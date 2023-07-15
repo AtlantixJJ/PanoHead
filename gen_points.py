@@ -29,6 +29,47 @@ from torch_utils import misc
 from training.triplane import TriPlaneGenerator
 
 
+def unproject_depth(depth, cam2world_matrix, intrinsics, resolution):
+    """
+    Create batches of rays and return origins and directions.
+
+    cam2world_matrix: (N, 4, 4)
+    intrinsics: (N, 3, 3)
+    resolution: int
+
+    ray_origins: (N, M, 3)
+    ray_dirs: (N, M, 2)
+    """
+    N, M = cam2world_matrix.shape[0], resolution**2
+    cam_locs_world = cam2world_matrix[:, :3, 3]
+    fx = intrinsics[:, 0, 0]
+    fy = intrinsics[:, 1, 1]
+    cx = intrinsics[:, 0, 2]
+    cy = intrinsics[:, 1, 2]
+    sk = intrinsics[:, 0, 1]
+
+    uv = torch.stack(torch.meshgrid(torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), indexing='ij')) * (1./resolution) + (0.5/resolution)
+    uv = uv.flip(0).reshape(2, -1).transpose(1, 0)
+    uv = uv.unsqueeze(0).repeat(cam2world_matrix.shape[0], 1, 1)
+
+    x_cam = uv[:, :, 0].view(N, -1)
+    y_cam = uv[:, :, 1].view(N, -1)
+    z_cam = torch.ones((N, M), device=cam2world_matrix.device)
+
+    x_lift = (x_cam - cx.unsqueeze(-1) + cy.unsqueeze(-1)*sk.unsqueeze(-1)/fy.unsqueeze(-1) - sk.unsqueeze(-1)*y_cam/fy.unsqueeze(-1)) / fx.unsqueeze(-1) * z_cam
+    y_lift = (y_cam - cy.unsqueeze(-1)) / fy.unsqueeze(-1) * z_cam
+
+    cam_rel_points = torch.stack((x_lift, y_lift, z_cam, torch.ones_like(z_cam)), dim=-1)
+
+    world_rel_points = torch.bmm(cam2world_matrix, cam_rel_points.permute(0, 2, 1)).permute(0, 2, 1)[:, :, :3]
+
+    ray_dirs = world_rel_points - cam_locs_world[:, None, :]
+    ray_dirs = torch.nn.functional.normalize(ray_dirs, dim=2)
+
+    ray_origins = cam_locs_world.unsqueeze(1).repeat(1, ray_dirs.shape[1], 1)
+
+    return ray_origins, ray_dirs
+
 #----------------------------------------------------------------------------
 
 def parse_range(s: Union[str, List]) -> List[int]:
@@ -194,53 +235,16 @@ def generate_images(
             ws = G.mapping(z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
             
             # img = G.synthesis(ws, camera_params, ws_bcg = ws_list[idx])['image']
-            img = G.synthesis(ws, camera_params)['image']
+            res = G.synthesis_point(ws, camera_params)
+            img = res['image']
+            print(res['avg_pos'].shape)
+            input()
             img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             imgs.append(img)
 
         img = torch.cat(imgs, dim=2)
 
         PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
-
-        if shapes:
-            # extract a shape.mrc with marching cubes. You can view the .mrc file using ChimeraX from UCSF.
-            max_batch=1000000
-
-            samples, voxel_origin, voxel_size = create_samples(N=shape_res, voxel_origin=[0, 0, 0], cube_length=G.rendering_kwargs['box_warp'] * 1)#.reshape(1, -1, 3)
-            samples = samples.to(z.device)
-            sigmas = torch.zeros((samples.shape[0], samples.shape[1], 1), device=z.device)
-            transformed_ray_directions_expanded = torch.zeros((samples.shape[0], max_batch, 3), device=z.device)
-            transformed_ray_directions_expanded[..., -1] = -1
-
-            head = 0
-            with tqdm(total = samples.shape[1]) as pbar:
-                with torch.no_grad():
-                    while head < samples.shape[1]:
-                        torch.manual_seed(0)
-                        sigma = G.sample(samples[:, head:head+max_batch], transformed_ray_directions_expanded[:, :samples.shape[1]-head], z, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, noise_mode='const')['sigma']
-                        sigmas[:, head:head+max_batch] = sigma
-                        head += max_batch
-                        pbar.update(max_batch)
-
-            sigmas = sigmas.reshape((shape_res, shape_res, shape_res)).cpu().numpy()
-            sigmas = np.flip(sigmas, 0)
-
-            # Trim the border of the extracted cube
-            pad = int(30 * shape_res / 256)
-            pad_value = -1000
-            sigmas[:pad] = pad_value
-            sigmas[-pad:] = pad_value
-            sigmas[:, :pad] = pad_value
-            sigmas[:, -pad:] = pad_value
-            sigmas[:, :, :pad] = pad_value
-            sigmas[:, :, -pad:] = pad_value
-
-            if shape_format == '.ply':
-                from shape_utils import convert_sdf_samples_to_ply
-                convert_sdf_samples_to_ply(np.transpose(sigmas, (2, 1, 0)), [0, 0, 0], 1, os.path.join(outdir, f'seed{seed:04d}.ply'), level=10)
-            elif shape_format == '.mrc': # output mrc
-                with mrcfile.new_mmap(os.path.join(outdir, f'seed{seed:04d}.mrc'), overwrite=True, shape=sigmas.shape, mrc_mode=2) as mrc:
-                    mrc.data[:] = sigmas
 
 
 #----------------------------------------------------------------------------

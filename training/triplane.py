@@ -142,6 +142,65 @@ class TriPlaneGenerator(torch.nn.Module):
         mask_image = weights_samples*(1 + 2*0.001) - 0.001
         return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, "image_mask": mask_image}
     
+    def synthesis_point(self, ws, c, neural_rendering_resolution=None, update_emas=False, 
+            ws_bcg=None, cache_backbone=False, use_cached_backbone=False, **synthesis_kwargs):
+        cam2world_matrix = c[:, :16].view(-1, 4, 4)
+        intrinsics = c[:, 16:25].view(-1, 3, 3)
+
+        if neural_rendering_resolution is None:
+            neural_rendering_resolution = self.neural_rendering_resolution
+        else:
+            self.neural_rendering_resolution = neural_rendering_resolution
+
+        # Create a batch of rays for volume rendering
+        ray_origins, ray_directions = self.ray_sampler(cam2world_matrix, intrinsics, neural_rendering_resolution)
+
+        # Create triplanes by running StyleGAN backbone
+        N, M, _ = ray_origins.shape
+        if use_cached_backbone and self._last_planes is not None:
+            planes = self._last_planes
+        else:
+            planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        if cache_backbone:
+            self._last_planes = planes
+
+        # Reshape output into three D*32-channel planes, where D=self.rendering_kwargs['triplane_depth'], defines the depth of the tri-grid
+        planes = planes.view(len(planes), 3, 32 * self.rendering_kwargs['triplane_depth'], planes.shape[-2], planes.shape[-1])
+
+        # Perform volume rendering
+        feature_samples, depth_samples, point_samples, weights_samples = self.renderer(planes, self.decoder, ray_origins, ray_directions, self.rendering_kwargs, return_avg_pos=True) # channels last
+
+        # Reshape into 'raw' neural-rendered image
+        H = W = self.neural_rendering_resolution
+        feature_image = feature_samples.permute(0, 2, 1).reshape(N, feature_samples.shape[-1], H, W).contiguous()
+        depth_image = depth_samples.permute(0, 2, 1).reshape(N, 1, H, W)
+        weights_samples = weights_samples.permute(0, 2, 1).reshape(N, 1, H, W)
+
+        # Run superresolution to get final image
+        if self.decoder.activation == "sigmoid":
+            feature_image = feature_image * 2 - 1 # Scale to (-1, 1), taken from ray marcher
+        # Generate Background
+        if self.bcg_synthesis:
+            ws_bcg = ws[:,:self.bcg_synthesis.num_ws] if ws_bcg is None else ws_bcg[:,:self.bcg_synthesis.num_ws]
+            if ws_bcg.size(1) < self.bcg_synthesis.num_ws:
+                ws_bcg = torch.cat([ws_bcg, ws_bcg[:,-1:].repeat(1,self.bcg_synthesis.num_ws-ws_bcg.size(1),1)], 1)
+            bcg_image = self.bcg_synthesis(ws_bcg, update_emas=update_emas, **synthesis_kwargs)
+            bcg_image = torch.nn.functional.interpolate(bcg_image, size=feature_image.shape[2:],
+                    mode='bilinear', align_corners=False, antialias=self.rendering_kwargs['sr_antialias'])
+            feature_image = feature_image + (1-weights_samples) * bcg_image
+
+        # Generate Raw image
+        if self.torgb:
+            rgb_image = self.torgb(feature_image, ws[:,-1], fused_modconv=False)
+            rgb_image = rgb_image.to(dtype=torch.float32, memory_format=torch.contiguous_format)
+        else:
+            rgb_image = feature_image[:, :3]
+        # Run superresolution to get final image
+        sr_image = self.superresolution(rgb_image, feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
+
+        mask_image = weights_samples * (1 + 2 * 0.001) - 0.001
+        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, "image_mask": mask_image, 'avg_pos': point_samples}
+    
     def sample(self, coordinates, directions, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)

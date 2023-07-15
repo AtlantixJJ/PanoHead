@@ -106,7 +106,7 @@ class ImportanceRenderer(torch.nn.Module):
         self.ray_marcher = MipRayMarcher2()
         self.plane_axes = generate_planes()
 
-    def forward(self, planes, decoder, ray_origins, ray_directions, rendering_options, triplane_crop=0.1, cull_clouds=None, binarize_clouds=None):
+    def forward(self, planes, decoder, ray_origins, ray_directions, rendering_options, triplane_crop=0.1, cull_clouds=None, binarize_clouds=None, return_avg_pos=False):
         self.plane_axes = self.plane_axes.to(ray_origins.device)
 
         if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
@@ -184,12 +184,12 @@ class ImportanceRenderer(torch.nn.Module):
             #                                                       depths_fine, colors_fine, densities_fine)
             all_depths, all_colors, all_densities, all_xyz = self.unify_samples(
                 depths_coarse, colors_coarse, densities_coarse, xyz_coarse,
-                depths_fine, colors_fine, densities_fine, xyz_fine,
-            )
+                depths_fine, colors_fine, densities_fine, xyz_fine)
 
-            # Aggregate
+            # Aggregate color-only
             # rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
 
+            # Aggregate color & average position
             all_colors_ = torch.cat([all_colors, all_xyz], dim=-1)
             rgb_final_, depth_final, weights = self.ray_marcher(all_colors_, all_densities, all_depths, rendering_options)
             rgb_final = rgb_final_[...,:-3]
@@ -201,7 +201,8 @@ class ImportanceRenderer(torch.nn.Module):
             rgb_final = rgb_final_[...,:-3]
             xyz_final = rgb_final_[...,-3:]
 
-
+        if return_avg_pos:
+            return rgb_final, depth_final, xyz_final, weights.sum(2)
         return rgb_final, depth_final, weights.sum(2)
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options):

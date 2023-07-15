@@ -115,6 +115,7 @@ class UniformCameraPoseSampler:
         forward_vectors = math_utils.normalize_vecs(-camera_origins)
         return create_cam2world_matrix(forward_vectors, camera_origins)    
 
+
 def create_cam2world_matrix(forward_vector, origin):
     """
     Takes in the direction the camera is pointing and the camera origin and returns a cam2world matrix.
