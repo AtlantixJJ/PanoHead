@@ -173,6 +173,7 @@ class TriPlaneGenerator(torch.nn.Module):
         # Reshape into 'raw' neural-rendered image
         H = W = self.neural_rendering_resolution
         feature_image = feature_samples.permute(0, 2, 1).reshape(N, feature_samples.shape[-1], H, W).contiguous()
+        point_samples = point_samples.permute(0, 2, 1).reshape(N, 3, H, W)
         depth_image = depth_samples.permute(0, 2, 1).reshape(N, 1, H, W)
         weights_samples = weights_samples.permute(0, 2, 1).reshape(N, 1, H, W)
 

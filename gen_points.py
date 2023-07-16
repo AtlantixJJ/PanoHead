@@ -14,14 +14,12 @@ import os
 import re
 from typing import List, Optional, Tuple, Union
 
+import trimesh
 import click
 import dnnlib
 import numpy as np
 import PIL.Image
 import torch
-from tqdm import tqdm
-import mrcfile
-
 
 import legacy
 from camera_utils import LookAtPoseSampler, FOV_to_intrinsics
@@ -181,11 +179,18 @@ def generate_images(
     python gen_samples.py --outdir=out --trunc=0.7 --shapes=true --seeds=0-3 \
         --network models/easy-khair-180-gpc0.8-trans10-025000.pkl
     """
-
+    torch.set_grad_enabled(False)
+    
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
-        G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+        G = legacy.load_network_pkl(f)['G_ema'].to(device)
+        #G_dict = legacy.load_network_pkl(f)['G_ema'].state_dict()
+    #c = json.load("training_options.json")
+    #common_kwargs = dict(c_dim=25, img_resolution=512, img_channels=3)
+    #G = dnnlib.util.construct_class_by_name(**c['G_kwargs'], **common_kwargs).eval().#requires_grad_(False).to(device)
+    #G.load_state_dict(G_dict)
+    #del G_dict
 
     # Specify reload_modules=True if you want code modifications to take effect; otherwise uses pickled code
     if reload_modules:
@@ -222,10 +227,10 @@ def generate_images(
         # ws_list.append(G.mapping(torch.from_numpy(np.random.RandomState(0).randn(1, G.z_dim)).to(device), conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff))
         # ws_list.append(G.mapping(z1, conditioning_params, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff))
  
-        imgs = []
+        imgs, point_images, point_cloud_pos, point_cloud_color = [], [], [], []
         angle_p = -0.2
         # for angle_y, angle_p in [(2.1, angle_p), (1.05, angle_p), (0, angle_p), (-1.05, angle_p), (-2.1, angle_p)]:
-        for idx, angles in enumerate([(0, angle_p), (-45/180*np.pi, angle_p), (-90/180*np.pi, angle_p), (-135/180*np.pi, angle_p), (-np.pi, angle_p)]):
+        for idx, angles in enumerate([(0, angle_p), (-45/180*np.pi, angle_p), (-90/180*np.pi, angle_p), (-135/180*np.pi, angle_p), (-np.pi, angle_p), (-225/180*np.pi, angle_p)]):
             angle_y = angles[0]
             angle_p = angles[1]
             # rand camera setting
@@ -236,16 +241,28 @@ def generate_images(
             
             # img = G.synthesis(ws, camera_params, ws_bcg = ws_list[idx])['image']
             res = G.synthesis_point(ws, camera_params)
-            img = res['image']
-            print(res['avg_pos'].shape)
-            input()
-            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = res['image'].permute(0, 2, 3, 1).contiguous().cpu() # (N, H, W, C)
+            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            points = torch.nn.functional.interpolate(
+                res['avg_pos'], img.shape[1:3], mode="bilinear")
+            points = points.permute(0, 2, 3, 1).contiguous().cpu()
+            point_cloud_pos.append(points.view(-1, 3).clone())
+            point_cloud_color.append(img.view(-1, 3).clone())
+            
+            point_img = (points - points.min()) / (points.max() - points.min())
+            point_img = (point_img * 255).to(torch.uint8)
             imgs.append(img)
+            point_images.append(point_img)
 
         img = torch.cat(imgs, dim=2)
+        point_image = torch.cat(point_images, dim=2)
+        point_cloud_pos = torch.cat(point_cloud_pos)
+        point_cloud_color = torch.cat(point_cloud_color)
+        pc_obj = trimesh.PointCloud(point_cloud_pos, point_cloud_color)
+        pc_obj.export(f'{outdir}/point_seed{seed:04d}.ply')
 
         PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
-
+        PIL.Image.fromarray(point_image[0].cpu().numpy(), 'RGB').save(f'{outdir}/pointimage_seed{seed:04d}.png')
 
 #----------------------------------------------------------------------------
 
