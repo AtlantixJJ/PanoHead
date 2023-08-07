@@ -35,7 +35,7 @@ import skimage.measure
 import argparse
 import mrcfile
 from tqdm import tqdm
-        
+
 
 def convert_sdf_samples_to_ply(
     numpy_3d_sdf_tensor,

@@ -66,7 +66,8 @@ class LookAtPoseSampler:
     """
 
     @staticmethod
-    def sample(horizontal_mean, vertical_mean, lookat_position, horizontal_stddev=0, vertical_stddev=0, radius=1, batch_size=1, device='cpu'):
+    def sample(horizontal_mean, vertical_mean, lookat_position, horizontal_stddev=0, 
+            vertical_stddev=0, radius=1, batch_size=1, device='cpu'):
         h = torch.randn((batch_size, 1), device=device) * horizontal_stddev + horizontal_mean
         v = torch.randn((batch_size, 1), device=device) * vertical_stddev + vertical_mean
         v = torch.clamp(v, 1e-5, math.pi - 1e-5)
@@ -84,6 +85,35 @@ class LookAtPoseSampler:
         # forward_vectors = math_utils.normalize_vecs(-camera_origins)
         forward_vectors = math_utils.normalize_vecs(lookat_position - camera_origins)
         return create_cam2world_matrix(forward_vectors, camera_origins)
+
+    @staticmethod
+    def sample2(horizontal_mean, vertical_mean, lookat_position, horizontal_stddev=0, 
+            vertical_stddev=0, radius=1, batch_size=1, device='cpu'):
+        """
+              y        
+              |
+              |  .C
+            O +--|--------> x
+             / \ |
+            /   \|
+           /     .P
+          z
+        C is the camera's origin. P is C's projection on z-x plane.
+        h = ∠POz, v = ∠COP.
+        """
+        h = torch.randn((batch_size, 1), device=device) * horizontal_stddev + horizontal_mean
+        v = torch.randn((batch_size, 1), device=device) * vertical_stddev + vertical_mean
+        v = torch.clamp(v, -math.pi / 2 + 1e-5, math.pi / 2 - 1e-5)
+
+        camera_origins = torch.zeros((batch_size, 3), device=device)
+
+        camera_origins[:, 0:1] = radius * torch.cos(v) * torch.sin(h)
+        camera_origins[:, 2:3] = radius * torch.cos(v) * torch.cos(h)
+        camera_origins[:, 1:2] = radius * torch.sin(v)
+
+        # forward_vectors = math_utils.normalize_vecs(-camera_origins)
+        forward_vectors = math_utils.normalize_vecs(lookat_position - camera_origins)
+        return create_cam2world_matrix2(forward_vectors, camera_origins)
 
 class UniformCameraPoseSampler:
     """
@@ -115,7 +145,6 @@ class UniformCameraPoseSampler:
         forward_vectors = math_utils.normalize_vecs(-camera_origins)
         return create_cam2world_matrix(forward_vectors, camera_origins)    
 
-
 def create_cam2world_matrix(forward_vector, origin):
     """
     Takes in the direction the camera is pointing and the camera origin and returns a cam2world matrix.
@@ -137,6 +166,28 @@ def create_cam2world_matrix(forward_vector, origin):
     assert(cam2world.shape[1:] == (4, 4))
     return cam2world
 
+def create_cam2world_matrix2(forward_vector, origin):
+    """
+    Takes in the direction the camera is pointing and the camera origin and returns a cam2world matrix.
+    Works on batches of forward_vectors, origins. Assumes y-axis is up and that there is no camera roll.
+    Here, z-axis in camera space looks inwards.
+    """
+
+    forward_vector = -math_utils.normalize_vecs(forward_vector)
+    up_vector = torch.tensor([0, 1, 0], dtype=torch.float, device=origin.device).expand_as(forward_vector)
+
+    right_vector = math_utils.normalize_vecs(torch.cross(up_vector, forward_vector, dim=-1))
+    up_vector = math_utils.normalize_vecs(torch.cross(forward_vector, right_vector, dim=-1))
+
+    rotation_matrix = torch.eye(4, device=origin.device).unsqueeze(0).repeat(forward_vector.shape[0], 1, 1)
+    rotation_matrix[:, :3, :3] = torch.stack((right_vector, up_vector, forward_vector), axis=-1)
+
+    translation_matrix = torch.eye(4, device=origin.device).unsqueeze(0).repeat(forward_vector.shape[0], 1, 1)
+    translation_matrix[:, :3, 3] = origin
+    cam2world = (translation_matrix @ rotation_matrix)[:, :, :]
+    assert(cam2world.shape[1:] == (4, 4))
+    return cam2world
+
 
 def FOV_to_intrinsics(fov_degrees, device='cpu'):
     """
@@ -145,6 +196,7 @@ def FOV_to_intrinsics(fov_degrees, device='cpu'):
     Assumes principal point is at image center.
     """
 
-    focal_length = float(1 / (math.tan(fov_degrees * 3.14159 / 360) * 1.414))
-    intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]], device=device)
-    return intrinsics
+    # focal_length = float(1 / (math.tan(fov_degrees * 3.14159 / 360) * 1.414))
+    focal_length = float(1 / (math.tan(fov_degrees * math.pi / 360))) / 2
+    intrinsics = torch.tensor([[0, focal_length, 0.5], [-focal_length, 0, 0.5], [0, 0, 1]])
+    return intrinsics.to(device)

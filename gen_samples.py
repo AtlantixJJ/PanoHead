@@ -211,6 +211,7 @@ def generate_images(
             sigmas = torch.zeros((samples.shape[0], samples.shape[1], 1), device=z.device)
             transformed_ray_directions_expanded = torch.zeros((samples.shape[0], max_batch, 3), device=z.device)
             transformed_ray_directions_expanded[..., -1] = -1
+            print(samples.shape)
 
             head = 0
             with tqdm(total = samples.shape[1]) as pbar:

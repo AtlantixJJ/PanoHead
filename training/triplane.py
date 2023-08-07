@@ -10,12 +10,39 @@
 
 import math
 import torch
+from skimage.measure import marching_cubes
+
 from torch_utils import persistence
 from training.networks_stylegan2 import ToRGBLayer, SynthesisNetwork, MappingNetwork
 from training.networks_stylegan2 import Generator as StyleGAN2Backbone
 from training.volumetric_rendering.renderer import ImportanceRenderer
 from training.volumetric_rendering.ray_sampler import RaySampler
 import dnnlib
+
+
+def create_samples(N=256, voxel_origin=[0, 0, 0], cube_length=2.0):
+    """Create the query samples for decoding a full volume."""
+    # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
+    voxel_origin = torch.Tensor(voxel_origin) - cube_length / 2
+    voxel_size = cube_length / (N - 1)
+
+    overall_index = torch.arange(0, N ** 3, 1, out=torch.LongTensor())
+    samples = torch.zeros(N ** 3, 3)
+
+    # transform first 3 columns
+    # to be the x, y, z index
+    samples[:, 2] = overall_index % N
+    samples[:, 1] = (overall_index.float() / N) % N
+    samples[:, 0] = ((overall_index.float() / N) / N) % N
+
+    # transform first 3 columns
+    # to be the x, y, z coordinate
+    samples[:, 0] = (samples[:, 0] * voxel_size) + voxel_origin[2]
+    samples[:, 1] = (samples[:, 1] * voxel_size) + voxel_origin[1]
+    samples[:, 2] = (samples[:, 2] * voxel_size) + voxel_origin[0]
+
+    return samples.unsqueeze(0), voxel_origin, voxel_size
+
 
 @persistence.persistent_class
 class TriPlaneGenerator(torch.nn.Module):
@@ -53,7 +80,6 @@ class TriPlaneGenerator(torch.nn.Module):
 
         self._last_planes = None
 
-    
     def mapping(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False):
         if self.rendering_kwargs['c_gen_conditioning_zero']:
                 c = torch.zeros_like(c)
@@ -141,7 +167,7 @@ class TriPlaneGenerator(torch.nn.Module):
 
         mask_image = weights_samples*(1 + 2*0.001) - 0.001
         return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, "image_mask": mask_image}
-    
+
     def synthesis_point(self, ws, c, neural_rendering_resolution=None, update_emas=False, 
             ws_bcg=None, cache_backbone=False, use_cached_backbone=False, **synthesis_kwargs):
         cam2world_matrix = c[:, :16].view(-1, 4, 4)
@@ -201,6 +227,62 @@ class TriPlaneGenerator(torch.nn.Module):
 
         mask_image = weights_samples * (1 + 2 * 0.001) - 0.001
         return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image, "image_mask": mask_image, 'avg_pos': point_samples}
+
+    def synthesis_volume(self, ws, neural_rendering_resolution=None, cache_backbone=False, use_cached_backbone=False, **synthesis_kwargs):
+
+        if neural_rendering_resolution is None:
+            neural_rendering_resolution = self.neural_rendering_resolution
+        else:
+            self.neural_rendering_resolution = neural_rendering_resolution
+
+        if use_cached_backbone and self._last_planes is not None:
+            planes = self._last_planes
+        else:
+            planes = self.backbone.synthesis(ws, **synthesis_kwargs)
+        if cache_backbone:
+            self._last_planes = planes
+
+        # Reshape output into three D*32-channel planes, where D=self.rendering_kwargs['triplane_depth'], defines the depth of the tri-grid
+        planes = planes.view(len(planes), 3, 32 * self.rendering_kwargs['triplane_depth'], planes.shape[-2], planes.shape[-1])
+
+        batch_size = 1000000
+        shape_res = 512
+        samples, voxel_origin, voxel_size = create_samples(
+            N=shape_res,
+            cube_length=self.rendering_kwargs['box_warp'] * 1)
+        samples = samples.to(planes.device)
+        occupancy = torch.zeros(
+            (*samples.shape[:2], 1), device=planes.device)
+        rays = torch.zeros(
+            (samples.shape[0], batch_size, 3), device=planes.device)
+        rays[..., -1] = -1
+
+        head = 0
+        with torch.no_grad():
+            while head < samples.shape[1]:
+                sigma = self.renderer.run_model(
+                    planes=planes, decoder=self.decoder,
+                    sample_coordinates=samples[:, head : head + batch_size], sample_directions=rays[:, :samples.shape[1] - head],
+                    options=self.rendering_kwargs)['sigma']
+                occupancy[:, head : head + batch_size] = sigma
+                head += batch_size
+
+        occupancy = occupancy.reshape((shape_res, shape_res, shape_res))
+        occupancy = torch.flip(occupancy, (0,)).cpu().numpy()
+
+        # Trim the border of the extracted cube
+        pad = int(30 * shape_res / 256)
+        pad_value = -1000
+        occupancy[:pad] = pad_value
+        occupancy[-pad:] = pad_value
+        occupancy[:, :pad] = pad_value
+        occupancy[:, -pad:] = pad_value
+        occupancy[:, :, :pad] = pad_value
+        occupancy[:, :, -pad:] = pad_value
+
+        #verts, faces, normals, values = marching_cubes(occupancy.cpu(), level=10, spacing=1)
+        return occupancy
+    
     
     def sample(self, coordinates, directions, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 

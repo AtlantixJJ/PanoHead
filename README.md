@@ -45,11 +45,11 @@ python gen_videos.py --seeds 0-3 --grid 2x2 --output out --cfg Head --trunc 0.7 
 ```.bash
 # Generate images and shapes (as .mrc files) using pre-trained model
 
-python gen_samples.py --outdir=out --trunc=0.7 --shapes=true --seeds=0-3 --shape-format .ply \
-    --network ../../pretrained/PanoHead/easy-khair-180-gpc0.8-trans10-025000.pkl
+python test.py --network ../../pretrained/PanoHead/easy-khair-180-gpc0.8-trans10-025000.pkl --reload_modules True 
 
-python gen_points.py --outdir=out --trunc=0.7 --shapes=true --seeds=0-3 --shape-format .ply --reload_modules True \
-    --network ../../pretrained/PanoHead/easy-khair-180-gpc0.8-trans10-025000.pkl
+python gen_samples.py --outdir=out --trunc=0.7 --shapes=true --seeds=0-3 --shape-format .ply --network ../../pretrained/PanoHead/easy-khair-180-gpc0.8-trans10-025000.pkl
+
+python gen_points.py --outdir=out --trunc=0.7 --shapes=true --seeds=0-3 --shape-format .ply --reload_modules True --network ../../pretrained/PanoHead/easy-khair-180-gpc0.8-trans10-025000.pkl
 ```
 
 ## Applications

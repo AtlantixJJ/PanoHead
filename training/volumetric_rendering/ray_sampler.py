@@ -34,27 +34,37 @@ class RaySampler(torch.nn.Module):
         """
         N, M = cam2world_matrix.shape[0], resolution**2
         cam_locs_world = cam2world_matrix[:, :3, 3]
-        fx = intrinsics[:, 0, 0]
-        fy = intrinsics[:, 1, 1]
-        cx = intrinsics[:, 0, 2]
-        cy = intrinsics[:, 1, 2]
-        sk = intrinsics[:, 0, 1]
+        # fx = intrinsics[:, 0, 0]
+        # fy = intrinsics[:, 1, 1]
+        # cx = intrinsics[:, 0, 2]
+        # cy = intrinsics[:, 1, 2]
+        # sk = intrinsics[:, 0, 1]
 
-        uv = torch.stack(torch.meshgrid(torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), indexing='ij')) * (1./resolution) + (0.5/resolution)
-        uv = uv.flip(0).reshape(2, -1).transpose(1, 0)
+        uv = torch.stack(torch.meshgrid(torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), 
+                            torch.arange(resolution, dtype=torch.float32, device=cam2world_matrix.device), 
+                            indexing='ij')
+                        ) * (1. / resolution) + (0.5 / resolution)
+        # uv = uv.flip(0).reshape(2, -1).transpose(1, 0)
+        uv = uv.reshape(2, -1).transpose(1, 0)
         uv = uv.unsqueeze(0).repeat(cam2world_matrix.shape[0], 1, 1)
 
-        x_cam = uv[:, :, 0].view(N, -1)
-        y_cam = uv[:, :, 1].view(N, -1)
-        z_cam = torch.ones((N, M), device=cam2world_matrix.device)
+        # x_cam = uv[:, :, 0].view(N, -1)
+        # y_cam = uv[:, :, 1].view(N, -1)
+        # z_cam = torch.ones((N, M), device=cam2world_matrix.device)
 
-        x_lift = (x_cam - cx.unsqueeze(-1) + cy.unsqueeze(-1)*sk.unsqueeze(-1)/fy.unsqueeze(-1) - sk.unsqueeze(-1)*y_cam/fy.unsqueeze(-1)) / fx.unsqueeze(-1) * z_cam
-        y_lift = (y_cam - cy.unsqueeze(-1)) / fy.unsqueeze(-1) * z_cam
+        # x_lift = (x_cam - cx.unsqueeze(-1) 
+        #             + cy.unsqueeze(-1) * sk.unsqueeze(-1) / fy.unsqueeze(-1) 
+        #             - sk.unsqueeze(-1)*y_cam / fy.unsqueeze(-1)) / fx.unsqueeze(-1) * z_cam
+        # y_lift = (y_cam - cy.unsqueeze(-1)) / fy.unsqueeze(-1) * z_cam
 
-        cam_rel_points = torch.stack((x_lift, y_lift, z_cam, torch.ones_like(z_cam)), dim=-1)
+        xyz = torch.linalg.solve(intrinsics, torch.concat((uv, 
+            torch.ones(N, M, 1).to(intrinsics.device)), dim=-1).permute(0, 2, 1)) 
+        cam_rel_points = torch.concat((-xyz, torch.ones(N, 1, M).to(intrinsics.device)), dim=1) # shape: (N, 4, M)
 
-        world_rel_points = torch.bmm(cam2world_matrix, cam_rel_points.permute(0, 2, 1)).permute(0, 2, 1)[:, :, :3]
+        # cam_rel_points = torch.stack((x_lift, y_lift, z_cam, torch.ones_like(z_cam)), dim=-1)
 
+        world_rel_points = torch.bmm(cam2world_matrix, cam_rel_points).permute(0, 2, 1)[:, :, :3]
+        
         ray_dirs = world_rel_points - cam_locs_world[:, None, :]
         ray_dirs = torch.nn.functional.normalize(ray_dirs, dim=2)
 
