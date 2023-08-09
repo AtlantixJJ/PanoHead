@@ -334,7 +334,7 @@ def generate_images(
         n_appface = torch.ceil(max_ppa * areas).int()
         max_appface = n_appface.clone()
         N_FACE = n_appface.shape[0]
-        K = 7
+        K = 3
         dilate_kernel = torch.ones((1, 1, K, K)).to(z)
 
         N_ELEV = 6
